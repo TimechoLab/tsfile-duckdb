@@ -1,0 +1,90 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# name: test/sql/tsfile_scan.test
+# description: Scan Apache TsFile table-model data
+# group: [tsfile]
+
+require tsfile
+
+query III
+SELECT count(*), count(s2), count(s9)
+FROM read_tsfile('test/data/simple_table_t1.tsfile', 'TEST');
+----
+60	52	52
+
+query TTTTTTTT
+SELECT typeof(s0), typeof(s2), typeof(s3), typeof(s5),
+       typeof(s6), typeof(s7), typeof(s8), typeof(s9)
+FROM read_tsfile('test/data/simple_table_t1.tsfile', 'test')
+LIMIT 1;
+----
+VARCHAR	BIGINT	FLOAT	TIMESTAMP_NS	INTEGER	DOUBLE	DATE	VARCHAR
+
+query ITIT rowsort
+SELECT time, s0, s2, s8
+FROM read_tsfile('test/data/simple_table_t1.tsfile', 'test')
+ORDER BY time
+LIMIT 2;
+----
+1760106020000	a	1010	2024-10-20
+1760106021000	a	1011	2024-10-21
+
+# Inclusive time range is pushed into the TsFile reader.
+query III
+SELECT count(*), min(time), max(time)
+FROM read_tsfile('test/data/simple_table_t1.tsfile', 'test')
+WHERE time BETWEEN 1760106022000 AND 1760106024000;
+----
+3	1760106022000	1760106024000
+
+# Strict comparisons are converted to the equivalent inclusive integer range.
+query I
+SELECT count(*)
+FROM read_tsfile('test/data/simple_table_t1.tsfile', 'test')
+WHERE 1760106021000 < time AND time < 1760106025000;
+----
+3
+
+# Contradictory and overflowing integer ranges do not open a scan.
+query I
+SELECT count(*)
+FROM read_tsfile('test/data/simple_table_t1.tsfile', 'test')
+WHERE time >= 1760106030000 AND time <= 1760106020000;
+----
+0
+
+query I
+SELECT count(*)
+FROM read_tsfile('test/data/simple_table_t1.tsfile', 'test')
+WHERE time > 9223372036854775807;
+----
+0
+
+# Unsupported FIELD filters remain above the scan and retain SQL semantics.
+query I
+SELECT count(*)
+FROM read_tsfile('test/data/simple_table_t1.tsfile', 'test')
+WHERE time BETWEEN 1760106020000 AND 1760106109000 AND s2 > 1050;
+----
+26
+
+statement error
+SELECT *
+FROM read_tsfile('test/data/simple_table_t1.tsfile', 'missing');
+----
+Table 'missing' was not found
