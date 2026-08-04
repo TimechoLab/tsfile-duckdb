@@ -89,9 +89,13 @@ endif()
 function(tsfile_archive_path OUTPUT_VAR ARCHIVE_NAME CONFIG_NAME)
   set(ARCHIVE_OUTPUT_NAME "${ARCHIVE_NAME}")
   string(TOUPPER "${CONFIG_NAME}" CONFIG_NAME_UPPER)
-  if(MSVC AND ARCHIVE_NAME STREQUAL "z" AND
-     CONFIG_NAME_UPPER STREQUAL "DEBUG")
-    set(ARCHIVE_OUTPUT_NAME "zd")
+  if(WIN32 AND ARCHIVE_NAME STREQUAL "z")
+    # Bundled zlib uses the target name on Windows/MinGW, while Unix builds
+    # rename the archive to libz. Debug builds also inherit zlib's `d` postfix.
+    set(ARCHIVE_OUTPUT_NAME "zlibstatic")
+    if(CONFIG_NAME_UPPER STREQUAL "DEBUG")
+      string(APPEND ARCHIVE_OUTPUT_NAME "d")
+    endif()
   endif()
 
   if(CMAKE_CONFIGURATION_TYPES)
