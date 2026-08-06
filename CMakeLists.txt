@@ -49,6 +49,14 @@ set(TSFILE_CMAKE_ARGS
     -DENABLE_ANTLR4:BOOL=OFF
     -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON)
 
+if(MSVC)
+  # TsFile declares CMake 3.11, so CMP0091 otherwise keeps its OLD behavior
+  # and ignores CMAKE_MSVC_RUNTIME_LIBRARY. Opt in before TsFile's project()
+  # call so its static archives use the same CRT as DuckDB.
+  list(APPEND TSFILE_CMAKE_ARGS
+       -DCMAKE_POLICY_DEFAULT_CMP0091:STRING=NEW)
+endif()
+
 if(NOT MSVC)
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     list(APPEND TSFILE_CMAKE_ARGS -DTSFILE_OPTIMIZATION_FLAGS:STRING=-O0)
