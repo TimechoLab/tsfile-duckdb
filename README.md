@@ -115,6 +115,30 @@ WHERE time BETWEEN 1700000000000 AND 1700003600000;
 
 `EXPLAIN` displays a pushed time range on the `READ_TSFILE` operator.
 
+To write a table-model TsFile, use DuckDB's standard `COPY` interface. The
+`TIME_COLUMN` is written as the TsFile time axis, columns listed in
+`TAG_COLUMNS` must be `VARCHAR` and identify the table's device, and all other
+columns become FIELD measurements:
+
+```sql
+COPY (
+    SELECT time, device_id, temperature, humidity
+    FROM measurements
+    ORDER BY device_id, time
+)
+TO '/data/measurements.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME 'sensors',
+    TIME_COLUMN 'time',
+    TAG_COLUMNS (device_id)
+);
+```
+
+The first writer implementation creates one local table per file, requires a
+`BIGINT` time column, and preserves NULLs in FIELD columns. TAG and TIME values
+must not be NULL. Input should be ordered by the TAG columns followed by time.
+
 ## Tests
 
 ```shell

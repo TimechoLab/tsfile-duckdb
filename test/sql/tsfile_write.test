@@ -1,0 +1,242 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# name: test/sql/tsfile_write.test
+# description: Write DuckDB query results to an Apache TsFile
+# group: [tsfile]
+
+require tsfile
+
+statement ok
+CREATE TABLE tsfile_write_source AS
+SELECT * FROM (VALUES
+    (1000::BIGINT, 'd1'::VARCHAR, TRUE, 7::INTEGER, 9::BIGINT, 1.25::FLOAT, 2.5::DOUBLE,
+     'alpha'::VARCHAR, DATE '2024-10-20'),
+    (1001::BIGINT, 'd1'::VARCHAR, FALSE, 8::INTEGER, NULL::BIGINT, 1.5::FLOAT, NULL::DOUBLE,
+     NULL::VARCHAR, DATE '2024-10-21'),
+    (1000::BIGINT, 'd2'::VARCHAR, TRUE, NULL::INTEGER, 11::BIGINT, 2.25::FLOAT, 3.5::DOUBLE,
+     'beta'::VARCHAR, DATE '2024-10-22')
+) t(time, device_id, enabled, value_i, value_l, value_f, value_d, label, day);
+
+statement ok
+COPY (
+    SELECT *
+    FROM tsfile_write_source
+    ORDER BY device_id, time
+)
+TO '__TEST_DIR__/tsfile_write_roundtrip.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME 'sensors',
+    TIME_COLUMN 'time',
+    TAG_COLUMNS (device_id)
+);
+
+query TTTTTTTTT
+SELECT typeof(time), typeof(device_id), typeof(enabled), typeof(value_i), typeof(value_l),
+       typeof(value_f), typeof(value_d), typeof(label), typeof(day)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+LIMIT 1;
+----
+BIGINT	VARCHAR	BOOLEAN	INTEGER	BIGINT	FLOAT	DOUBLE	VARCHAR	DATE
+
+query TTTTTTTTT
+SELECT CAST(time AS VARCHAR), device_id, CAST(enabled AS VARCHAR), CAST(value_i AS VARCHAR),
+       CAST(value_l AS VARCHAR), CAST(value_f AS VARCHAR), CAST(value_d AS VARCHAR), label,
+       CAST(day AS VARCHAR)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+ORDER BY device_id, time;
+----
+1000	d1	true	7	9	1.25	2.5	alpha	2024-10-20
+1001	d1	false	8	NULL	1.5	NULL	NULL	2024-10-21
+1000	d2	true	NULL	11	2.25	3.5	beta	2024-10-22
+
+statement ok
+COPY (
+    SELECT i::BIGINT AS time,
+           'device-' || CAST(i % 3 AS VARCHAR) AS device_id,
+           (i * 2)::BIGINT AS value_l
+    FROM range(5000) t(i)
+    ORDER BY device_id, time
+)
+TO '__TEST_DIR__/tsfile_write_many.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME 'sensors',
+    TAG_COLUMNS (device_id)
+);
+
+query III
+SELECT count(*), min(time), max(time)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_many.tsfile', 'sensors');
+----
+5000	0	4999
+
+statement error
+COPY (
+    SELECT 1::BIGINT AS time, 1::INTEGER AS device_id, 2.0::DOUBLE AS value
+)
+TO '__TEST_DIR__/tsfile_write_bad_tag.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME 'sensors',
+    TAG_COLUMNS (device_id)
+);
+----
+TsFile TAG column 'device_id' must have type VARCHAR
+
+statement error
+COPY (
+    SELECT 1::BIGINT AS time, NULL::VARCHAR AS device_id, 2.0::DOUBLE AS value
+)
+TO '__TEST_DIR__/tsfile_write_null_tag.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME 'sensors',
+    TAG_COLUMNS (device_id)
+);
+----
+TsFile TAG column 'device_id' cannot contain NULL
+
+# TIME_COLUMN and TAG_COLUMNS are matched case-insensitively, and the time
+# column does not have to be the first input column.
+statement ok
+COPY (
+    SELECT 'west'::VARCHAR AS region,
+           2000::BIGINT AS event_time,
+           'device-1'::VARCHAR AS device_id,
+           NULL::DOUBLE AS value
+)
+TO '__TEST_DIR__/tsfile_write_multiple_tags.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME 'multi_tag_sensors',
+    TIME_COLUMN 'EVENT_TIME',
+    TAG_COLUMNS (REGION, DEVICE_ID)
+);
+
+query TTT
+SELECT CAST(time AS VARCHAR), region, device_id
+FROM read_tsfile('__TEST_DIR__/tsfile_write_multiple_tags.tsfile', 'multi_tag_sensors');
+----
+2000	west	device-1
+
+# Omitting TAG_COLUMNS creates a file with only FIELD columns.
+statement ok
+COPY (
+    SELECT 3000::BIGINT AS time,
+           'field-only'::VARCHAR AS message,
+           42::INTEGER AS value
+)
+TO '__TEST_DIR__/tsfile_write_without_tags.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME 'field_only'
+);
+
+query TTT
+SELECT CAST(time AS VARCHAR), message, CAST(value AS VARCHAR)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_without_tags.tsfile', 'field_only');
+----
+3000	field-only	42
+
+# Timestamp values are mapped to TsFile TIMESTAMP fields.
+statement ok
+COPY (
+    SELECT 4000::BIGINT AS time,
+           TIMESTAMP '2024-10-20 12:34:56.123456'::TIMESTAMP_NS AS event_ts
+)
+TO '__TEST_DIR__/tsfile_write_timestamp.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME 'timestamp_fields'
+);
+
+query II
+SELECT typeof(event_ts), CAST(event_ts AS VARCHAR)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_timestamp.tsfile', 'timestamp_fields');
+----
+TIMESTAMP_NS	2024-10-20 12:34:56.123456
+
+statement error
+COPY (
+    SELECT 1::BIGINT AS time, 2::INTEGER AS value
+)
+TO '__TEST_DIR__/tsfile_write_missing_time.tsfile'
+(
+    FORMAT tsfile,
+    TIME_COLUMN 'event_time'
+);
+----
+TIME_COLUMN 'event_time' was not found in the input
+
+statement error
+COPY (
+    SELECT 1::INTEGER AS time, 2::INTEGER AS value
+)
+TO '__TEST_DIR__/tsfile_write_bad_time_type.tsfile'
+(
+    FORMAT tsfile
+);
+----
+TsFile TIME_COLUMN 'time' must have type BIGINT in the first version
+
+statement error
+COPY (
+    SELECT 1::BIGINT AS time, 'd1'::VARCHAR AS device_id, 2::INTEGER AS value
+)
+TO '__TEST_DIR__/tsfile_write_missing_tag.tsfile'
+(
+    FORMAT tsfile,
+    TAG_COLUMNS (missing)
+);
+----
+TAG_COLUMNS expected to find 'missing' in the input
+
+statement error
+COPY (
+    SELECT 1::BIGINT AS time, 'd1'::VARCHAR AS device_id, 2::INTEGER AS value
+)
+TO '__TEST_DIR__/tsfile_write_duplicate_tag.tsfile'
+(
+    FORMAT tsfile,
+    TAG_COLUMNS (device_id, DEVICE_ID)
+);
+----
+TAG_COLUMNS contains duplicate column 'DEVICE_ID'
+
+statement error
+COPY (
+    SELECT 1::BIGINT AS time, 'd1'::VARCHAR AS device_id, 2::INTEGER AS value
+)
+TO '__TEST_DIR__/tsfile_write_time_as_tag.tsfile'
+(
+    FORMAT tsfile,
+    TAG_COLUMNS (time)
+);
+----
+TIME_COLUMN cannot also be a TAG column
+
+statement error
+COPY (
+    SELECT NULL::BIGINT AS time, 2::INTEGER AS value
+)
+TO '__TEST_DIR__/tsfile_write_null_time.tsfile'
+(
+    FORMAT tsfile
+);
+----
+TsFile TIME_COLUMN 'time' cannot contain NULL

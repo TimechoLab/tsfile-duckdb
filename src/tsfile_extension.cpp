@@ -25,6 +25,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "tsfile_extension.hpp"
+#include "tsfile_copy.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
@@ -516,6 +517,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	read_tsfile.pushdown_complex_filter = TsFileComplexFilterPushdown;
 	read_tsfile.to_string = TsFileToString;
 	loader.RegisterFunction(read_tsfile);
+	RegisterTsFileCopyFunction(loader);
 }
 
 } // namespace
