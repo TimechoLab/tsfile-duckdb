@@ -317,7 +317,10 @@ static bool TryGetStringConstant(const Expression &expression, string &value) {
 		return false;
 	}
 	value = StringValue::Get(constant);
-	return true;
+	// The current TsFile tag-filter C API accepts NUL-terminated strings.
+	// Keeping this predicate in DuckDB avoids truncating embedded NUL bytes
+	// and changing the result rather than merely weakening pushdown.
+	return value.find('\0') == string::npos;
 }
 
 static bool TryGetTagFilterOp(ExpressionType comparison, TagFilterOp &op) {

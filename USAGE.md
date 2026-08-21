@@ -172,7 +172,9 @@ The current writer maps these DuckDB types to TsFile types:
 ## Complete read-query-write-read pipeline
 
 The following example reads the repository fixture, selects a time range,
-writes the selected rows to a new TsFile, and reads the result back:
+writes the selected rows to a new TsFile, and reads the result back. The
+fixture's `s8` DATE column is cast to `VARCHAR` because DATE writing is
+temporarily unsupported:
 
 ```sql
 LOAD 'build/release/extension/tsfile/tsfile.duckdb_extension';
@@ -181,7 +183,7 @@ COPY (
     SELECT time,
            s0 AS device_id,
            s2 AS value,
-           s8 AS day
+           CAST(s8 AS VARCHAR) AS day
     FROM read_tsfile('test/data/simple_table_t1.tsfile', 'test')
     WHERE s0 = 'a'
       AND time BETWEEN 1760106022000 AND 1760106024000

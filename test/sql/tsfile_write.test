@@ -372,3 +372,36 @@ TO '__TEST_DIR__/tsfile_write_roundtrip.tsfile'
 );
 ----
 TsFile COPY cannot write directly to an existing path; omit USE_TMP_FILE false
+
+# Embedded NUL bytes cannot be represented by the current TsFile tag-filter C
+# API, so equality and BETWEEN stay in DuckDB instead of being pushed down.
+statement ok
+COPY (
+    SELECT *
+    FROM (VALUES
+        (1::BIGINT, ('a' || chr(0) || 'b')::VARCHAR, 11::INTEGER),
+        (2::BIGINT, 'a'::VARCHAR, 22::INTEGER)
+    ) t(time, device_id, value)
+    ORDER BY device_id, time
+)
+TO '__TEST_DIR__/tsfile_write_nul_tags.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME nul_tags,
+    TIME_COLUMN time,
+    TAG_COLUMNS (device_id)
+);
+
+query I
+SELECT value
+FROM read_tsfile('__TEST_DIR__/tsfile_write_nul_tags.tsfile', 'nul_tags')
+WHERE device_id = 'a' || chr(0) || 'b';
+----
+11
+
+query I
+SELECT value
+FROM read_tsfile('__TEST_DIR__/tsfile_write_nul_tags.tsfile', 'nul_tags')
+WHERE device_id BETWEEN ('a' || chr(0) || 'b') AND ('a' || chr(0) || 'b');
+----
+11
