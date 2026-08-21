@@ -52,15 +52,31 @@ SELECT *
 FROM read_tsfile('/data/measurements.tsfile', 'sensors');
 ```
 
-Projection and time predicates can be written as normal SQL. Time predicates
-are pushed into the TsFile scan when they use `=`, `<`, `<=`, `>`, `>=`, or
-`BETWEEN`:
+Projection, time predicates, and TAG predicates can be written as normal SQL.
+Time predicates are pushed into the TsFile scan when they use `=`, `<`, `<=`,
+`>`, `>=`, or `BETWEEN`:
 
 ```sql
 SELECT time, device_id, temperature
 FROM read_tsfile('/data/measurements.tsfile', 'sensors')
 WHERE time BETWEEN 1700000000000 AND 1700003600000;
 ```
+
+String TAG columns are pushed into TsFile's device filter when they use `=`,
+`!=`, `<`, `<=`, `>`, `>=`, inclusive `BETWEEN`, `IS NULL`, or `IS NOT NULL`.
+Supported TAG predicates can also be combined with `AND` and `OR`:
+
+```sql
+SELECT time, device_id, temperature
+FROM read_tsfile('/data/measurements.tsfile', 'sensors')
+WHERE (device_id = 'device-01' OR device_id = 'device-02')
+  AND time BETWEEN 1700000000000 AND 1700003600000;
+```
+
+Use `EXPLAIN` to verify the scan. Pushed predicates appear as `Time Range` and
+`TAG Filter` properties of `READ_TSFILE`. FIELD predicates and unsupported TAG
+expressions, including arbitrary `NOT (...)`, remain in DuckDB and are evaluated
+after the scan.
 
 The global TsFile time axis is exposed as DuckDB `BIGINT`. A TsFile timestamp
 measurement is exposed as DuckDB `TIMESTAMP_NS`.
@@ -158,7 +174,8 @@ COPY (
            s2 AS value,
            s8 AS day
     FROM read_tsfile('test/data/simple_table_t1.tsfile', 'test')
-    WHERE time BETWEEN 1760106022000 AND 1760106024000
+    WHERE s0 = 'a'
+      AND time BETWEEN 1760106022000 AND 1760106024000
     ORDER BY device_id, time
 )
 TO '/tmp/tsfile_subset.tsfile'
@@ -209,4 +226,3 @@ described in [README.md](README.md#build). Run the SQL tests with:
 export TSFILE_ROOT=/path/to/tsfile
 GEN=ninja make test
 ```
-

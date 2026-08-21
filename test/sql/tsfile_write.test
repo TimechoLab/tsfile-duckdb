@@ -64,6 +64,72 @@ ORDER BY device_id, time;
 1001	d1	false	8	NULL	1.5	NULL	NULL	2024-10-21
 1000	d2	true	NULL	11	2.25	3.5	beta	2024-10-22
 
+# TAG equality is pushed into the TsFile device scan.
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+WHERE device_id = 'd1';
+----
+2
+
+# TAG and time predicates are pushed together.
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+WHERE device_id = 'd1' AND time = 1001;
+----
+1
+
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+WHERE 'd1' = device_id AND 1000 <= time;
+----
+2
+
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+WHERE device_id = 'missing';
+----
+0
+
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+WHERE device_id != 'd1';
+----
+1
+
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+WHERE device_id BETWEEN 'd1' AND 'd1';
+----
+2
+
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+WHERE device_id = 'd1' OR device_id = 'd2';
+----
+3
+
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+WHERE device_id IS NOT NULL;
+----
+3
+
+# VARCHAR FIELD predicates remain in DuckDB and retain normal SQL semantics.
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
+WHERE label = 'alpha';
+----
+1
+
 statement ok
 COPY (
     SELECT i::BIGINT AS time,
@@ -115,10 +181,13 @@ TsFile TAG column 'device_id' cannot contain NULL
 # column does not have to be the first input column.
 statement ok
 COPY (
-    SELECT 'west'::VARCHAR AS region,
-           2000::BIGINT AS event_time,
-           'device-1'::VARCHAR AS device_id,
-           NULL::DOUBLE AS value
+    SELECT *
+    FROM (VALUES
+        ('east'::VARCHAR, 2002::BIGINT, 'device-1'::VARCHAR, 2.0::DOUBLE),
+        ('west'::VARCHAR, 2000::BIGINT, 'device-1'::VARCHAR, NULL::DOUBLE),
+        ('west'::VARCHAR, 2001::BIGINT, 'device-2'::VARCHAR, 1.0::DOUBLE)
+    ) t(region, event_time, device_id, value)
+    ORDER BY region, device_id, event_time
 )
 TO '__TEST_DIR__/tsfile_write_multiple_tags.tsfile'
 (
@@ -130,9 +199,20 @@ TO '__TEST_DIR__/tsfile_write_multiple_tags.tsfile'
 
 query TTT
 SELECT CAST(time AS VARCHAR), region, device_id
-FROM read_tsfile('__TEST_DIR__/tsfile_write_multiple_tags.tsfile', 'multi_tag_sensors');
+FROM read_tsfile('__TEST_DIR__/tsfile_write_multiple_tags.tsfile', 'multi_tag_sensors')
+ORDER BY region, device_id, time;
 ----
+2002	east	device-1
 2000	west	device-1
+2001	west	device-2
+
+# Predicates on multiple TAG columns are combined inside the TsFile scan.
+query I
+SELECT count(*)
+FROM read_tsfile('__TEST_DIR__/tsfile_write_multiple_tags.tsfile', 'multi_tag_sensors')
+WHERE region = 'west' AND device_id = 'device-2';
+----
+1
 
 # Omitting TAG_COLUMNS creates a file with only FIELD columns.
 statement ok

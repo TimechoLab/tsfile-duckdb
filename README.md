@@ -40,6 +40,8 @@ The extension supports:
 - one local TsFile and one table per `read_tsfile(path, table_name)` call;
 - DuckDB projection pushdown into the TsFile column list;
 - `time` predicates using `=`, `<`, `<=`, `>`, `>=`, and `BETWEEN`;
+- TAG predicates using `=`, `!=`, `<`, `<=`, `>`, `>=`, `BETWEEN`,
+  `IS NULL`, and `IS NOT NULL`, including supported `AND`/`OR` combinations;
 - BOOLEAN, INT32, INT64, FLOAT, DOUBLE, TEXT, STRING, TIMESTAMP, DATE, and BLOB;
 - NULL values and result sets spanning multiple DuckDB vector batches.
 
@@ -48,8 +50,9 @@ or protocol convention. A TsFile `TIMESTAMP` measurement is exposed as DuckDB
 `TIMESTAMP_NS`, matching the Arrow C schema produced by the TsFile C wrapper.
 
 Tree-model files, multi-file scans, automatic table discovery, parallel scans,
-TAG/FIELD filter pushdown, and zero-copy Arrow transfer are not implemented.
-Unsupported filters remain in DuckDB and are evaluated after the scan.
+FIELD filter pushdown, arbitrary `NOT` TAG expressions, and zero-copy Arrow
+transfer are not implemented. Unsupported filters remain in DuckDB and are
+evaluated after the scan.
 
 ## Build
 
@@ -110,10 +113,12 @@ LOAD 'build/release/extension/tsfile/tsfile.duckdb_extension';
 
 SELECT time, device_id, temperature
 FROM read_tsfile('/data/measurements.tsfile', 'sensors')
-WHERE time BETWEEN 1700000000000 AND 1700003600000;
+WHERE device_id = 'device-01'
+  AND time BETWEEN 1700000000000 AND 1700003600000;
 ```
 
-`EXPLAIN` displays a pushed time range on the `READ_TSFILE` operator.
+`EXPLAIN` displays the pushed `Time Range` and `TAG Filter` on the
+`READ_TSFILE` operator.
 
 To write a table-model TsFile, use DuckDB's standard `COPY` interface. The
 `TIME_COLUMN` is written as the TsFile time axis, columns listed in
