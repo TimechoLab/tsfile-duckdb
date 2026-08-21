@@ -139,6 +139,9 @@ The first writer implementation creates one local table per file, requires a
 `BIGINT` time column, and preserves NULLs in FIELD columns. TAG and TIME values
 must not be NULL. Input should be ordered by the TAG columns followed by time.
 
+See [USAGE.md](USAGE.md) for the complete read, query, write, and round-trip
+workflow.
+
 ## Tests
 
 ```shell
