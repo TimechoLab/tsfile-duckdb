@@ -134,8 +134,8 @@ COPY (
 TO '/data/measurements.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'sensors',
-    TIME_COLUMN 'time',
+    TABLE_NAME sensors,
+    TIME_COLUMN time,
     TAG_COLUMNS (device_id)
 );
 ```
@@ -143,6 +143,10 @@ TO '/data/measurements.tsfile'
 The first writer implementation creates one local table per file, requires a
 `BIGINT` time column, and preserves NULLs in FIELD columns. TAG and TIME values
 must not be NULL. Input should be ordered by the TAG columns followed by time.
+DATE FIELD writing is temporarily disabled until the TsFile DATE conversion is
+timezone-independent; DATE values can still be read from existing TsFiles.
+When writing directly (with `USE_TMP_FILE false`), the target path must not
+already exist; use the default temporary-file path for `OVERWRITE` behavior.
 
 See [USAGE.md](USAGE.md) for the complete read, query, write, and round-trip
 workflow.

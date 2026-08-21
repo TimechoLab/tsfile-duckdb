@@ -24,12 +24,12 @@ statement ok
 CREATE TABLE tsfile_write_source AS
 SELECT * FROM (VALUES
     (1000::BIGINT, 'd1'::VARCHAR, TRUE, 7::INTEGER, 9::BIGINT, 1.25::FLOAT, 2.5::DOUBLE,
-     'alpha'::VARCHAR, DATE '2024-10-20'),
+     'alpha'::VARCHAR),
     (1001::BIGINT, 'd1'::VARCHAR, FALSE, 8::INTEGER, NULL::BIGINT, 1.5::FLOAT, NULL::DOUBLE,
-     NULL::VARCHAR, DATE '2024-10-21'),
+     NULL::VARCHAR),
     (1000::BIGINT, 'd2'::VARCHAR, TRUE, NULL::INTEGER, 11::BIGINT, 2.25::FLOAT, 3.5::DOUBLE,
-     'beta'::VARCHAR, DATE '2024-10-22')
-) t(time, device_id, enabled, value_i, value_l, value_f, value_d, label, day);
+     'beta'::VARCHAR)
+) t(time, device_id, enabled, value_i, value_l, value_f, value_d, label);
 
 statement ok
 COPY (
@@ -40,29 +40,28 @@ COPY (
 TO '__TEST_DIR__/tsfile_write_roundtrip.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'sensors',
-    TIME_COLUMN 'time',
+    TABLE_NAME sensors,
+    TIME_COLUMN time,
     TAG_COLUMNS (device_id)
 );
 
-query TTTTTTTTT
+query TTTTTTTT
 SELECT typeof(time), typeof(device_id), typeof(enabled), typeof(value_i), typeof(value_l),
-       typeof(value_f), typeof(value_d), typeof(label), typeof(day)
+       typeof(value_f), typeof(value_d), typeof(label)
 FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
 LIMIT 1;
 ----
-BIGINT	VARCHAR	BOOLEAN	INTEGER	BIGINT	FLOAT	DOUBLE	VARCHAR	DATE
+BIGINT	VARCHAR	BOOLEAN	INTEGER	BIGINT	FLOAT	DOUBLE	VARCHAR
 
-query TTTTTTTTT
+query TTTTTTTT
 SELECT CAST(time AS VARCHAR), device_id, CAST(enabled AS VARCHAR), CAST(value_i AS VARCHAR),
-       CAST(value_l AS VARCHAR), CAST(value_f AS VARCHAR), CAST(value_d AS VARCHAR), label,
-       CAST(day AS VARCHAR)
+       CAST(value_l AS VARCHAR), CAST(value_f AS VARCHAR), CAST(value_d AS VARCHAR), label
 FROM read_tsfile('__TEST_DIR__/tsfile_write_roundtrip.tsfile', 'sensors')
 ORDER BY device_id, time;
 ----
-1000	d1	true	7	9	1.25	2.5	alpha	2024-10-20
-1001	d1	false	8	NULL	1.5	NULL	NULL	2024-10-21
-1000	d2	true	NULL	11	2.25	3.5	beta	2024-10-22
+1000	d1	true	7	9	1.25	2.5	alpha
+1001	d1	false	8	NULL	1.5	NULL	NULL
+1000	d2	true	NULL	11	2.25	3.5	beta
 
 # TAG equality is pushed into the TsFile device scan.
 query I
@@ -141,7 +140,7 @@ COPY (
 TO '__TEST_DIR__/tsfile_write_many.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'sensors',
+    TABLE_NAME sensors,
     TAG_COLUMNS (device_id)
 );
 
@@ -158,7 +157,7 @@ COPY (
 TO '__TEST_DIR__/tsfile_write_bad_tag.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'sensors',
+    TABLE_NAME sensors,
     TAG_COLUMNS (device_id)
 );
 ----
@@ -171,7 +170,7 @@ COPY (
 TO '__TEST_DIR__/tsfile_write_null_tag.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'sensors',
+    TABLE_NAME sensors,
     TAG_COLUMNS (device_id)
 );
 ----
@@ -192,8 +191,8 @@ COPY (
 TO '__TEST_DIR__/tsfile_write_multiple_tags.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'multi_tag_sensors',
-    TIME_COLUMN 'EVENT_TIME',
+    TABLE_NAME multi_tag_sensors,
+    TIME_COLUMN EVENT_TIME,
     TAG_COLUMNS (REGION, DEVICE_ID)
 );
 
@@ -224,7 +223,7 @@ COPY (
 TO '__TEST_DIR__/tsfile_write_without_tags.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'field_only'
+    TABLE_NAME field_only
 );
 
 query TTT
@@ -242,7 +241,7 @@ COPY (
 TO '__TEST_DIR__/tsfile_write_timestamp.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'timestamp_fields'
+    TABLE_NAME timestamp_fields
 );
 
 query II
@@ -251,6 +250,19 @@ FROM read_tsfile('__TEST_DIR__/tsfile_write_timestamp.tsfile', 'timestamp_fields
 ----
 TIMESTAMP_NS	2024-10-20 12:34:56.123456
 
+# DATE writing is rejected until the TsFile DATE conversion is timezone-safe.
+statement error
+COPY (
+    SELECT 1::BIGINT AS time, DATE '2024-10-20' AS day
+)
+TO '__TEST_DIR__/tsfile_write_date.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME date_fields
+);
+----
+TsFile COPY DATE columns are temporarily unsupported; use VARCHAR or INTEGER
+
 statement error
 COPY (
     SELECT 1::BIGINT AS time, 2::INTEGER AS value
@@ -258,7 +270,7 @@ COPY (
 TO '__TEST_DIR__/tsfile_write_missing_time.tsfile'
 (
     FORMAT tsfile,
-    TIME_COLUMN 'event_time'
+    TIME_COLUMN event_time
 );
 ----
 TIME_COLUMN 'event_time' was not found in the input
@@ -320,3 +332,43 @@ TO '__TEST_DIR__/tsfile_write_null_time.tsfile'
 );
 ----
 TsFile TIME_COLUMN 'time' cannot contain NULL
+
+statement error
+COPY (
+    SELECT 1::BIGINT AS event_time, 2::INTEGER AS time, 3::INTEGER AS value
+)
+TO '__TEST_DIR__/tsfile_write_time_name_conflict.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME sensors,
+    TIME_COLUMN event_time
+);
+----
+TsFile COPY reserves column name 'time' for the synthetic time axis
+
+statement error
+COPY (
+    SELECT 1::BIGINT AS time, 2::INTEGER AS value
+    WHERE false
+)
+TO '__TEST_DIR__/tsfile_write_empty.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME sensors
+);
+----
+TsFile COPY cannot write an empty result; at least one row is required
+
+statement error
+COPY (
+    SELECT 2000::BIGINT AS time, 2::INTEGER AS value
+)
+TO '__TEST_DIR__/tsfile_write_roundtrip.tsfile'
+(
+    FORMAT tsfile,
+    TABLE_NAME sensors,
+    OVERWRITE true,
+    USE_TMP_FILE false
+);
+----
+TsFile COPY cannot write directly to an existing path; omit USE_TMP_FILE false

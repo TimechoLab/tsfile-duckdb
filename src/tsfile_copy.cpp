@@ -20,8 +20,8 @@
 
 #include "duckdb/common/bind_helpers.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -32,6 +32,8 @@
 #include "cwrapper/tsfile_cwrapper.h"
 #undef ArrowSchema
 #undef ArrowArray
+
+#include "writer/tsfile_table_writer.h"
 
 #include <limits>
 
@@ -71,11 +73,24 @@ struct TsFileCopyBindData final : public FunctionData {
 struct TsFileCopyGlobalState final : public GlobalFunctionData {
 	WriteFile file = nullptr;
 	TsFileWriter writer = nullptr;
+	string file_path;
+	bool wrote_rows = false;
+
+	static void DisposeWriter(TsFileWriter writer) {
+		// The C wrapper retains the opaque writer when close() fails. Destroy
+		// the concrete C++ writer before releasing its WriteFile handle.
+		delete static_cast<storage::TsFileTableWriter *>(writer);
+	}
 
 	ERRNO Close() {
 		if (writer) {
 			auto ret = tsfile_writer_close(writer);
 			if (ret != RET_OK) {
+				DisposeWriter(writer);
+				writer = nullptr;
+				if (file) {
+					free_write_file(&file);
+				}
 				return ret;
 			}
 			writer = nullptr;
@@ -126,7 +141,7 @@ static TSDataType ToTsFileType(const LogicalType &type, const string &column_nam
 	case LogicalTypeId::BLOB:
 		return TS_DATATYPE_BLOB;
 	case LogicalTypeId::DATE:
-		return TS_DATATYPE_DATE;
+		throw BinderException("TsFile COPY DATE columns are temporarily unsupported; use VARCHAR or INTEGER");
 	case LogicalTypeId::TIMESTAMP_NS:
 		return TS_DATATYPE_TIMESTAMP;
 	default:
@@ -201,6 +216,11 @@ static unique_ptr<FunctionData> BindTsFileCopy(ClientContext &, CopyFunctionBind
 		throw BinderException("TsFile TIME_COLUMN '%s' must have type BIGINT in the first version",
 		                      result->column_names[result->time_column_index]);
 	}
+	for (idx_t i = 0; i < names.size(); i++) {
+		if (i != result->time_column_index && StringUtil::CIEquals(names[i], "time")) {
+			throw BinderException("TsFile COPY reserves column name 'time' for the synthetic time axis");
+		}
+	}
 
 	if (!tag_values.empty()) {
 		case_insensitive_map_t<bool> seen_tags;
@@ -252,10 +272,14 @@ static void ThrowTsFileError(const string &operation, ERRNO error) {
 	}
 }
 
-static unique_ptr<GlobalFunctionData> InitializeTsFileCopyGlobal(ClientContext &, FunctionData &bind_data,
+static unique_ptr<GlobalFunctionData> InitializeTsFileCopyGlobal(ClientContext &context, FunctionData &bind_data,
                                                                  const string &file_path) {
 	auto &bind = bind_data.Cast<TsFileCopyBindData>();
 	auto result = make_uniq<TsFileCopyGlobalState>();
+	result->file_path = file_path;
+	if (FileSystem::GetFileSystem(context).FileExists(file_path)) {
+		throw IOException("TsFile COPY cannot write directly to an existing path; omit USE_TMP_FILE false");
+	}
 
 	ERRNO error = RET_OK;
 	result->file = write_file_new(file_path.c_str(), &error);
@@ -336,16 +360,6 @@ static void AddTsFileValue(Tablet tablet, const TsFileCopyBindData &bind, idx_t 
 		                                                  NumericCast<uint32_t>(tablet_column), values[source_row]));
 		break;
 	}
-	case TS_DATATYPE_DATE: {
-		auto values = UnifiedVectorFormat::GetData<date_t>(format);
-		int32_t year, month, day;
-		Date::Convert(values[source_row], year, month, day);
-		const int32_t yyyymmdd = year * 10000 + month * 100 + day;
-		ThrowTsFileError("value write",
-		                 tablet_add_value_by_index_int32_t(tablet, NumericCast<uint32_t>(row),
-		                                                   NumericCast<uint32_t>(tablet_column), yyyymmdd));
-		break;
-	}
 	case TS_DATATYPE_TIMESTAMP: {
 		auto values = UnifiedVectorFormat::GetData<timestamp_ns_t>(format);
 		ThrowTsFileError("value write", tablet_add_value_by_index_int64_t(tablet, NumericCast<uint32_t>(row),
@@ -422,6 +436,7 @@ static void SinkTsFileCopy(ExecutionContext &, FunctionData &bind_data, GlobalFu
 		}
 
 		ThrowTsFileError("tablet write", tsfile_writer_write(state.writer, tablet));
+		state.wrote_rows = true;
 		free_tablet(&tablet);
 	} catch (...) {
 		if (tablet) {
@@ -434,10 +449,17 @@ static void SinkTsFileCopy(ExecutionContext &, FunctionData &bind_data, GlobalFu
 static void CombineTsFileCopy(ExecutionContext &, FunctionData &, GlobalFunctionData &, LocalFunctionData &) {
 }
 
-static void FinalizeTsFileCopy(ClientContext &, FunctionData &, GlobalFunctionData &global_state) {
+static void FinalizeTsFileCopy(ClientContext &context, FunctionData &, GlobalFunctionData &global_state) {
 	auto &state = global_state.Cast<TsFileCopyGlobalState>();
 	auto error = state.Close();
 	ThrowTsFileError("close", error);
+	if (!state.wrote_rows) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		if (fs.FileExists(state.file_path)) {
+			fs.RemoveFile(state.file_path);
+		}
+		throw InvalidInputException("TsFile COPY cannot write an empty result; at least one row is required");
+	}
 }
 
 static CopyFunctionExecutionMode TsFileCopyExecutionMode(bool, bool) {

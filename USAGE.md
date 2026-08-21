@@ -94,8 +94,8 @@ COPY (
 TO '/data/measurements.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'sensors',
-    TIME_COLUMN 'time',
+    TABLE_NAME sensors,
+    TIME_COLUMN time,
     TAG_COLUMNS (device_id)
 );
 ```
@@ -111,6 +111,16 @@ The write options are:
 
 All input columns except `TIME_COLUMN` and the columns listed in
 `TAG_COLUMNS` become FIELD measurements.
+
+`TABLE_NAME` and `TIME_COLUMN` are documented using identifier syntax. Their
+single-quoted string forms remain accepted for compatibility, but the
+identifier form makes it clear that `TIME_COLUMN` names an input column:
+
+```sql
+TABLE_NAME sensors,
+TIME_COLUMN event_time,
+TAG_COLUMNS (device_id)
+```
 
 ## TAG_COLUMNS
 
@@ -139,8 +149,8 @@ COPY (
 TO '/data/field-only.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'sensors',
-    TIME_COLUMN 'time'
+    TABLE_NAME sensors,
+    TIME_COLUMN time
 );
 ```
 
@@ -157,7 +167,6 @@ The current writer maps these DuckDB types to TsFile types:
 | `DOUBLE` | DOUBLE | FIELD NULL is preserved. |
 | `VARCHAR` | STRING | FIELD NULL is preserved; TAG NULL is rejected. |
 | `BLOB` | BLOB | FIELD NULL is preserved. |
-| `DATE` | DATE | FIELD NULL is preserved. |
 | `TIMESTAMP_NS` | TIMESTAMP | FIELD NULL is preserved. |
 
 ## Complete read-query-write-read pipeline
@@ -181,8 +190,8 @@ COPY (
 TO '/tmp/tsfile_subset.tsfile'
 (
     FORMAT tsfile,
-    TABLE_NAME 'subset',
-    TIME_COLUMN 'time',
+    TABLE_NAME subset,
+    TIME_COLUMN time,
     TAG_COLUMNS (device_id)
 );
 
@@ -211,6 +220,11 @@ ORDER BY device_id, region, time
 The first writer implementation currently has these limitations:
 
 - `TIME_COLUMN` must be a `BIGINT`.
+- DATE FIELD writing is temporarily unsupported because the pinned TsFile DATE
+  conversion depends on the local timezone. Existing DATE measurements remain
+  readable.
+- Direct writes with `USE_TMP_FILE false` require a new target path. To replace
+  an existing file, leave temporary-file handling enabled (the default).
 - TAG and TIME values cannot be NULL.
 - Input should be ordered by TAG columns followed by time.
 - One output file contains one local table created by the writer.
