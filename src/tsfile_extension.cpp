@@ -828,6 +828,8 @@ static void TsFileScanFunction(ClientContext &, TableFunctionInput &input, DataC
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
+	loader.SetDescription("Read and write Apache TsFile table-model files with DuckDB SQL");
+
 	TableFunction read_tsfile("read_tsfile", {LogicalType::VARCHAR, LogicalType::VARCHAR}, TsFileScanFunction,
 	                          TsFileScanBind, TsFileScanInit);
 	read_tsfile.projection_pushdown = true;

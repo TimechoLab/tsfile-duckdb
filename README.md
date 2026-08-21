@@ -21,8 +21,8 @@
 
 # DuckDB TsFile extension
 
-This repository contains an experimental DuckDB extension for querying Apache
-TsFile table-model files directly with SQL:
+This repository contains an experimental DuckDB extension for reading and
+writing Apache TsFile table-model files directly with SQL:
 
 ```sql
 SELECT * FROM read_tsfile('/data/measurements.tsfile', 'sensors');
