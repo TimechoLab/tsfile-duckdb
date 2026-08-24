@@ -21,6 +21,13 @@
 
 require tsfile
 
+query T
+SELECT description
+FROM duckdb_extensions()
+WHERE extension_name = 'tsfile';
+----
+Read and write Apache TsFile table-model files with DuckDB SQL
+
 query III
 SELECT count(*), count(s2), count(s9)
 FROM read_tsfile('test/data/simple_table_t1.tsfile', 'TEST');

@@ -25,6 +25,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "tsfile_extension.hpp"
+#include "tsfile_copy.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
@@ -37,6 +38,8 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include "cwrapper/errno_define_c.h"
@@ -69,11 +72,53 @@ struct TsFileSchemaList {
 	}
 };
 
+enum class TsFileTagFilterKind : uint8_t { COMPARISON, BETWEEN, IS_NULL, IS_NOT_NULL, AND, OR };
+
+struct TsFileTagFilterSpec {
+	TsFileTagFilterKind kind = TsFileTagFilterKind::COMPARISON;
+	TagFilterOp comparison = TAG_FILTER_EQ;
+	string column_name;
+	string value;
+	string upper;
+	string display;
+	vector<unique_ptr<TsFileTagFilterSpec>> children;
+
+	unique_ptr<TsFileTagFilterSpec> Copy() const {
+		auto result = make_uniq<TsFileTagFilterSpec>();
+		result->kind = kind;
+		result->comparison = comparison;
+		result->column_name = column_name;
+		result->value = value;
+		result->upper = upper;
+		result->display = display;
+		for (auto &child : children) {
+			result->children.emplace_back(child->Copy());
+		}
+		return result;
+	}
+
+	bool Equals(const TsFileTagFilterSpec &other) const {
+		if (kind != other.kind || comparison != other.comparison || column_name != other.column_name ||
+		    value != other.value || upper != other.upper || display != other.display ||
+		    children.size() != other.children.size()) {
+			return false;
+		}
+		for (idx_t i = 0; i < children.size(); i++) {
+			if (!children[i]->Equals(*other.children[i])) {
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
 struct TsFileBindData : public TableFunctionData {
 	string file_path;
 	string table_name;
 	vector<string> column_names;
 	vector<TSDataType> column_types;
+	vector<ColumnCategory> column_categories;
+	vector<unique_ptr<TsFileTagFilterSpec>> tag_filters;
 	int64_t start_time = std::numeric_limits<int64_t>::min();
 	int64_t end_time = std::numeric_limits<int64_t>::max();
 	bool empty = false;
@@ -85,6 +130,10 @@ struct TsFileBindData : public TableFunctionData {
 		result->table_name = table_name;
 		result->column_names = column_names;
 		result->column_types = column_types;
+		result->column_categories = column_categories;
+		for (auto &tag_filter : tag_filters) {
+			result->tag_filters.emplace_back(tag_filter->Copy());
+		}
 		result->start_time = start_time;
 		result->end_time = end_time;
 		result->empty = empty;
@@ -93,15 +142,25 @@ struct TsFileBindData : public TableFunctionData {
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<TsFileBindData>();
-		return file_path == other.file_path && table_name == other.table_name && column_names == other.column_names &&
-		       column_types == other.column_types && start_time == other.start_time && end_time == other.end_time &&
-		       empty == other.empty;
+		if (file_path != other.file_path || table_name != other.table_name || column_names != other.column_names ||
+		    column_types != other.column_types || column_categories != other.column_categories ||
+		    start_time != other.start_time || end_time != other.end_time || empty != other.empty ||
+		    tag_filters.size() != other.tag_filters.size()) {
+			return false;
+		}
+		for (idx_t i = 0; i < tag_filters.size(); i++) {
+			if (!tag_filters[i]->Equals(*other.tag_filters[i])) {
+				return false;
+			}
+		}
+		return true;
 	}
 };
 
 struct TsFileScanState : public GlobalTableFunctionState {
 	TsFileReader reader = nullptr;
 	ResultSet result_set = nullptr;
+	TagFilterHandle tag_filter = nullptr;
 	TsFileArrowArray current_array {};
 	TsFileArrowSchema current_schema {};
 	vector<idx_t> arrow_child_for_output;
@@ -126,6 +185,9 @@ struct TsFileScanState : public GlobalTableFunctionState {
 		if (result_set) {
 			free_tsfile_result_set(&result_set);
 		}
+		if (tag_filter) {
+			tsfile_tag_filter_free(tag_filter);
+		}
 		if (reader) {
 			tsfile_reader_close(reader);
 			reader = nullptr;
@@ -133,12 +195,26 @@ struct TsFileScanState : public GlobalTableFunctionState {
 	}
 };
 
-static bool IsTimeColumn(const Expression &expression, const LogicalGet &get) {
+static bool TryGetTsFileColumnIndex(const Expression &expression, const LogicalGet &get, idx_t &column_index) {
 	if (expression.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
 		return false;
 	}
 	auto &column = expression.Cast<BoundColumnRefExpression>();
-	return column.depth == 0 && column.binding.table_index == get.table_index && column.binding.column_index == 0;
+	if (column.depth != 0 || column.binding.table_index != get.table_index ||
+	    column.binding.column_index >= get.GetColumnIds().size()) {
+		return false;
+	}
+	auto &projected_column = get.GetColumnIds()[column.binding.column_index];
+	if (!projected_column.HasPrimaryIndex() || projected_column.IsVirtualColumn()) {
+		return false;
+	}
+	column_index = projected_column.GetPrimaryIndex();
+	return true;
+}
+
+static bool IsTimeColumn(const Expression &expression, const LogicalGet &get) {
+	idx_t column_index;
+	return TryGetTsFileColumnIndex(expression, get, column_index) && column_index == 0;
 }
 
 static bool TryGetTimeConstant(const Expression &expression, int64_t &result) {
@@ -224,6 +300,213 @@ static bool TryPushdownTimeComparison(LogicalGet &get, TsFileBindData &bind_data
 	return false;
 }
 
+static bool TryGetTagColumnIndex(const Expression &expression, const LogicalGet &get, const TsFileBindData &bind_data,
+                                 idx_t &column_index) {
+	if (!TryGetTsFileColumnIndex(expression, get, column_index) || column_index >= bind_data.column_names.size()) {
+		return false;
+	}
+	return bind_data.column_categories[column_index] == TAG;
+}
+
+static bool TryGetStringConstant(const Expression &expression, string &value) {
+	if (expression.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		return false;
+	}
+	auto constant = expression.Cast<BoundConstantExpression>().value;
+	if (constant.IsNull() || constant.type().id() != LogicalTypeId::VARCHAR) {
+		return false;
+	}
+	value = StringValue::Get(constant);
+	// The current TsFile tag-filter C API accepts NUL-terminated strings.
+	// Keeping this predicate in DuckDB avoids truncating embedded NUL bytes
+	// and changing the result rather than merely weakening pushdown.
+	return value.find('\0') == string::npos;
+}
+
+static bool TryGetTagFilterOp(ExpressionType comparison, TagFilterOp &op) {
+	switch (comparison) {
+	case ExpressionType::COMPARE_EQUAL:
+		op = TAG_FILTER_EQ;
+		return true;
+	case ExpressionType::COMPARE_NOTEQUAL:
+		op = TAG_FILTER_NEQ;
+		return true;
+	case ExpressionType::COMPARE_LESSTHAN:
+		op = TAG_FILTER_LT;
+		return true;
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		op = TAG_FILTER_LTEQ;
+		return true;
+	case ExpressionType::COMPARE_GREATERTHAN:
+		op = TAG_FILTER_GT;
+		return true;
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		op = TAG_FILTER_GTEQ;
+		return true;
+	default:
+		return false;
+	}
+}
+
+static unique_ptr<TsFileTagFilterSpec> TryCreateTagFilterSpec(const Expression &expression, const LogicalGet &get,
+                                                              const TsFileBindData &bind_data) {
+	if (expression.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
+		auto &comparison = expression.Cast<BoundComparisonExpression>();
+		auto comparison_type = comparison.GetExpressionType();
+		idx_t tag_index;
+		string value;
+		if (TryGetTagColumnIndex(*comparison.left, get, bind_data, tag_index) &&
+		    TryGetStringConstant(*comparison.right, value)) {
+			// Already in column OP constant form.
+		} else if (TryGetTagColumnIndex(*comparison.right, get, bind_data, tag_index) &&
+		           TryGetStringConstant(*comparison.left, value)) {
+			comparison_type = FlipComparisonExpression(comparison_type);
+		} else {
+			return nullptr;
+		}
+		TagFilterOp op;
+		if (!TryGetTagFilterOp(comparison_type, op)) {
+			return nullptr;
+		}
+		auto result = make_uniq<TsFileTagFilterSpec>();
+		result->kind = TsFileTagFilterKind::COMPARISON;
+		result->comparison = op;
+		result->column_name = bind_data.column_names[tag_index];
+		result->value = value;
+		result->display = expression.ToString();
+		return result;
+	}
+
+	if (expression.GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
+		auto &between = expression.Cast<BoundBetweenExpression>();
+		idx_t tag_index;
+		string lower;
+		string upper;
+		if (!between.lower_inclusive || !between.upper_inclusive ||
+		    !TryGetTagColumnIndex(*between.input, get, bind_data, tag_index) ||
+		    !TryGetStringConstant(*between.lower, lower) || !TryGetStringConstant(*between.upper, upper)) {
+			return nullptr;
+		}
+		auto result = make_uniq<TsFileTagFilterSpec>();
+		result->kind = TsFileTagFilterKind::BETWEEN;
+		result->column_name = bind_data.column_names[tag_index];
+		result->value = lower;
+		result->upper = upper;
+		result->display = expression.ToString();
+		return result;
+	}
+
+	if (expression.GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) {
+		auto &op = expression.Cast<BoundOperatorExpression>();
+		if (op.GetExpressionType() == ExpressionType::OPERATOR_IS_NULL ||
+		    op.GetExpressionType() == ExpressionType::OPERATOR_IS_NOT_NULL) {
+			idx_t tag_index;
+			if (op.children.size() != 1 || !TryGetTagColumnIndex(*op.children[0], get, bind_data, tag_index)) {
+				return nullptr;
+			}
+			auto result = make_uniq<TsFileTagFilterSpec>();
+			result->kind = op.GetExpressionType() == ExpressionType::OPERATOR_IS_NULL
+			                   ? TsFileTagFilterKind::IS_NULL
+			                   : TsFileTagFilterKind::IS_NOT_NULL;
+			result->column_name = bind_data.column_names[tag_index];
+			result->display = expression.ToString();
+			return result;
+		}
+		return nullptr;
+	}
+
+	if (expression.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+		auto &conjunction = expression.Cast<BoundConjunctionExpression>();
+		if (conjunction.children.empty() || (conjunction.GetExpressionType() != ExpressionType::CONJUNCTION_AND &&
+		                                     conjunction.GetExpressionType() != ExpressionType::CONJUNCTION_OR)) {
+			return nullptr;
+		}
+		auto result = make_uniq<TsFileTagFilterSpec>();
+		result->kind = conjunction.GetExpressionType() == ExpressionType::CONJUNCTION_AND ? TsFileTagFilterKind::AND
+		                                                                                  : TsFileTagFilterKind::OR;
+		result->display = expression.ToString();
+		for (auto &child : conjunction.children) {
+			auto child_filter = TryCreateTagFilterSpec(*child, get, bind_data);
+			if (!child_filter) {
+				return nullptr;
+			}
+			result->children.emplace_back(std::move(child_filter));
+		}
+		return result;
+	}
+
+	return nullptr;
+}
+
+static TagFilterHandle BuildTsFileTagFilter(const TsFileTagFilterSpec &filter, const string &table_name,
+                                            TsFileReader reader) {
+	if (filter.kind == TsFileTagFilterKind::COMPARISON) {
+		ERRNO error = RET_OK;
+		auto result = tsfile_tag_filter_create(reader, table_name.c_str(), filter.column_name.c_str(),
+		                                       filter.value.c_str(), filter.comparison, &error);
+		if (error != RET_OK && result) {
+			tsfile_tag_filter_free(result);
+			return nullptr;
+		}
+		return result;
+	}
+
+	if (filter.kind == TsFileTagFilterKind::BETWEEN) {
+		ERRNO error = RET_OK;
+		auto result = tsfile_tag_filter_between(reader, table_name.c_str(), filter.column_name.c_str(),
+		                                        filter.value.c_str(), filter.upper.c_str(), false, &error);
+		if (error != RET_OK && result) {
+			tsfile_tag_filter_free(result);
+			return nullptr;
+		}
+		return result;
+	}
+
+	if (filter.kind == TsFileTagFilterKind::IS_NULL || filter.kind == TsFileTagFilterKind::IS_NOT_NULL) {
+		ERRNO error = RET_OK;
+		auto op = filter.kind == TsFileTagFilterKind::IS_NULL ? TAG_FILTER_IS_NULL : TAG_FILTER_IS_NOT_NULL;
+		// The current C wrapper validates value even for NULL-aware operators;
+		// the value is ignored by the underlying builder.
+		auto result = tsfile_tag_filter_create(reader, table_name.c_str(), filter.column_name.c_str(), "", op, &error);
+		if (error != RET_OK && result) {
+			tsfile_tag_filter_free(result);
+			return nullptr;
+		}
+		return result;
+	}
+
+	if (filter.kind == TsFileTagFilterKind::AND || filter.kind == TsFileTagFilterKind::OR) {
+		if (filter.children.empty()) {
+			return nullptr;
+		}
+		TagFilterHandle result = nullptr;
+		for (auto &child_filter : filter.children) {
+			auto child = BuildTsFileTagFilter(*child_filter, table_name, reader);
+			if (!child) {
+				if (result) {
+					tsfile_tag_filter_free(result);
+				}
+				return nullptr;
+			}
+			if (!result) {
+				result = child;
+				continue;
+			}
+			auto combined = filter.kind == TsFileTagFilterKind::AND ? tsfile_tag_filter_and(result, child)
+			                                                        : tsfile_tag_filter_or(result, child);
+			if (!combined) {
+				tsfile_tag_filter_free(result);
+				tsfile_tag_filter_free(child);
+				return nullptr;
+			}
+			result = combined;
+		}
+		return result;
+	}
+
+	return nullptr;
+}
+
 static void TsFileComplexFilterPushdown(ClientContext &, LogicalGet &get, FunctionData *bind_data_p,
                                         vector<unique_ptr<Expression>> &filters) {
 	auto &bind_data = bind_data_p->Cast<TsFileBindData>();
@@ -231,7 +514,13 @@ static void TsFileComplexFilterPushdown(ClientContext &, LogicalGet &get, Functi
 		if (TryPushdownTimeComparison(get, bind_data, *filters[filter_index])) {
 			filters.erase_at(filter_index);
 		} else {
-			filter_index++;
+			auto tag_filter = TryCreateTagFilterSpec(*filters[filter_index], get, bind_data);
+			if (tag_filter) {
+				bind_data.tag_filters.emplace_back(std::move(tag_filter));
+				filters.erase_at(filter_index);
+			} else {
+				filter_index++;
+			}
 		}
 	}
 }
@@ -246,6 +535,16 @@ static InsertionOrderPreservingMap<string> TsFileToString(TableFunctionToStringI
 	} else if (bind_data.start_time != std::numeric_limits<int64_t>::min() ||
 	           bind_data.end_time != std::numeric_limits<int64_t>::max()) {
 		result["Time Range"] = StringUtil::Format("[%lld, %lld]", bind_data.start_time, bind_data.end_time);
+	}
+	if (!bind_data.tag_filters.empty()) {
+		string tag_filter_text;
+		for (auto &tag_filter : bind_data.tag_filters) {
+			if (!tag_filter_text.empty()) {
+				tag_filter_text += " AND ";
+			}
+			tag_filter_text += tag_filter->display;
+		}
+		result["TAG Filter"] = tag_filter_text;
 	}
 	return result;
 }
@@ -318,6 +617,7 @@ static unique_ptr<FunctionData> TsFileScanBind(ClientContext &, TableFunctionBin
 	return_types.emplace_back(LogicalType::BIGINT);
 	result->column_names.emplace_back("time");
 	result->column_types.emplace_back(TS_DATATYPE_INT64);
+	result->column_categories.emplace_back(FIELD);
 
 	for (int i = 0; i < selected_schema->column_num; i++) {
 		auto &column = selected_schema->column_schemas[i];
@@ -328,6 +628,7 @@ static unique_ptr<FunctionData> TsFileScanBind(ClientContext &, TableFunctionBin
 		return_types.emplace_back(ToDuckDBType(column.data_type));
 		result->column_names.emplace_back(column.column_name);
 		result->column_types.emplace_back(column.data_type);
+		result->column_categories.emplace_back(column.column_category);
 	}
 
 	return std::move(result);
@@ -345,6 +646,26 @@ static unique_ptr<GlobalTableFunctionState> TsFileScanInit(ClientContext &, Tabl
 	state->reader = tsfile_reader_new(bind_data.file_path.c_str(), &error);
 	if (!state->reader || error != RET_OK) {
 		throw IOException("Could not open TsFile '%s' (TsFile error %d)", bind_data.file_path, error);
+	}
+	for (auto &tag_filter_expression : bind_data.tag_filters) {
+		auto tag_filter = BuildTsFileTagFilter(*tag_filter_expression, bind_data.table_name, state->reader);
+		if (!tag_filter) {
+			throw IOException("Could not construct TAG filter for table '%s' in TsFile '%s'", bind_data.table_name,
+			                  bind_data.file_path);
+		}
+		if (!state->tag_filter) {
+			state->tag_filter = tag_filter;
+		} else {
+			auto combined = tsfile_tag_filter_and(state->tag_filter, tag_filter);
+			if (!combined) {
+				tsfile_tag_filter_free(state->tag_filter);
+				tsfile_tag_filter_free(tag_filter);
+				state->tag_filter = nullptr;
+				throw IOException("Could not combine TAG filters for table '%s' in TsFile '%s'", bind_data.table_name,
+				                  bind_data.file_path);
+			}
+			state->tag_filter = combined;
+		}
 	}
 
 	vector<string> query_columns;
@@ -384,7 +705,7 @@ static unique_ptr<GlobalTableFunctionState> TsFileScanInit(ClientContext &, Tabl
 	state->result_set =
 	    tsfile_query_table_batch(state->reader, bind_data.table_name.c_str(), query_column_ptrs.data(),
 	                             static_cast<uint32_t>(query_column_ptrs.size()), bind_data.start_time,
-	                             bind_data.end_time, nullptr, static_cast<int>(STANDARD_VECTOR_SIZE), &error);
+	                             bind_data.end_time, state->tag_filter, static_cast<int>(STANDARD_VECTOR_SIZE), &error);
 	if (!state->result_set || error != RET_OK) {
 		throw IOException("Could not query table '%s' in TsFile '%s' (TsFile error %d)", bind_data.table_name,
 		                  bind_data.file_path, error);
@@ -510,12 +831,15 @@ static void TsFileScanFunction(ClientContext &, TableFunctionInput &input, DataC
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
+	loader.SetDescription("Read and write Apache TsFile table-model files with DuckDB SQL");
+
 	TableFunction read_tsfile("read_tsfile", {LogicalType::VARCHAR, LogicalType::VARCHAR}, TsFileScanFunction,
 	                          TsFileScanBind, TsFileScanInit);
 	read_tsfile.projection_pushdown = true;
 	read_tsfile.pushdown_complex_filter = TsFileComplexFilterPushdown;
 	read_tsfile.to_string = TsFileToString;
 	loader.RegisterFunction(read_tsfile);
+	RegisterTsFileCopyFunction(loader);
 }
 
 } // namespace
