@@ -28,10 +28,9 @@ writing Apache TsFile table-model files directly with SQL:
 SELECT * FROM read_tsfile('/data/measurements.tsfile', 'sensors');
 ```
 
-The current prototype targets DuckDB `v1.5.5` and the Apache TsFile C wrapper
-at commit `1bdbcd857d058ffda7f2d73a26b212504701deb4`. That TsFile commit is
-available from the `fix/aligned-gorilla-nan-parallel-read` branch of
-[`ColinLeeo/tsfile`](https://github.com/ColinLeeo/tsfile).
+The current prototype targets DuckDB `v1.5.5` and Apache TsFile commit
+`7ca2e79fbdd9a36ef9dde5e522b7c23020536aeb`. Both dependencies are pinned as
+Git submodules.
 
 ## Status
 
@@ -56,29 +55,22 @@ evaluated after the scan.
 
 ## Build
 
-Clone this repository with its DuckDB build submodules:
+Clone this repository with all of its build dependencies:
 
 ```shell
-git clone --recurse-submodules git@github.com:ColinLeeo/tsfile-duckdb.git
-```
-
-Build the required TsFile C++ library from the pinned fork revision:
-
-```shell
-git clone https://github.com/ColinLeeo/tsfile.git
-cd tsfile
-git checkout 1bdbcd857d058ffda7f2d73a26b212504701deb4
-cd cpp
-bash build.sh -t=Release --disable-antlr4
+git clone --recurse-submodules git@github.com:TimechoLab/tsfile-duckdb.git
 ```
 
 Then build the extension:
 
 ```shell
 cd /path/to/tsfile-duckdb
-export TSFILE_ROOT=/path/to/tsfile
 GEN=ninja make
 ```
+
+The build compiles the pinned TsFile sources and bundled codecs as
+position-independent static libraries in an isolated CMake build. The
+resulting extension does not require a separately installed `libtsfile`.
 
 The main outputs are:
 
@@ -95,7 +87,7 @@ cmake -S duckdb -B build/release -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DDUCKDB_EXPLICIT_PLATFORM=osx_arm64 \
   -DDUCKDB_EXTENSION_CONFIGS="$PWD/extension_config.cmake" \
-  -DTSFILE_BUILD_DIR="$TSFILE_ROOT/cpp/build/Release" \
+  -DUNITTEST_ROOT_DIRECTORY="$PWD" \
   -DBUILD_UNITTESTS=ON
 cmake --build build/release --target duckdb tsfile_loadable_extension unittest -j8
 ```
@@ -213,7 +205,6 @@ workflow.
 ## Tests
 
 ```shell
-export TSFILE_ROOT=/path/to/tsfile
 GEN=ninja make test
 ```
 
@@ -221,9 +212,7 @@ The checked-in fixture is documented in `test/data/README.md`.
 
 ## Community extension roadmap
 
-The prototype currently links a prebuilt shared `libtsfile`. Before submission
-to DuckDB's community extension repository, TsFile must be built reproducibly
-inside the extension pipeline and linked or packaged portably for every DuckDB
-target. The next integration step is to add a pinned dependency build that does
-not leak TsFile's global CMake flags into DuckDB and produces a self-contained
-extension artifact.
+The extension builds a pinned Apache TsFile revision in its own CMake project
+and statically links TsFile and its bundled codecs. This keeps TsFile's global
+CMake settings out of DuckDB and produces a self-contained extension artifact
+for the DuckDB community extension pipeline.
