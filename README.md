@@ -58,7 +58,7 @@ evaluated after the scan.
 Clone this repository with all of its build dependencies:
 
 ```shell
-git clone --recurse-submodules git@github.com:ColinLeeo/tsfile-duckdb.git
+git clone --recurse-submodules git@github.com:TimechoLab/tsfile-duckdb.git
 ```
 
 Then build the extension:
@@ -212,9 +212,7 @@ The checked-in fixture is documented in `test/data/README.md`.
 
 ## Community extension roadmap
 
-The extension now builds a pinned Apache TsFile revision in its own CMake
-project and statically links TsFile and its bundled codecs. This keeps TsFile's
-global CMake settings out of DuckDB and produces a self-contained extension
-artifact. The next integration step is to validate the supported DuckDB target
-matrix and submit an extension descriptor to the DuckDB community extension
-repository.
+The extension builds a pinned Apache TsFile revision in its own CMake project
+and statically links TsFile and its bundled codecs. This keeps TsFile's global
+CMake settings out of DuckDB and produces a self-contained extension artifact
+for the DuckDB community extension pipeline.
