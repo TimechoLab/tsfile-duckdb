@@ -180,6 +180,12 @@ import_tsfile_archive(tsfile_lzokay lzokay)
 import_tsfile_archive(tsfile_zlib z)
 find_package(Threads REQUIRED)
 target_compile_definitions(tsfile_sdk INTERFACE TSFILE_STATIC)
+if(MSVC)
+  # MSVC reports the legacy C++98 value for __cplusplus unless this option is
+  # enabled. TsFile's public headers use __cplusplus to select portable C++11
+  # implementations, so propagate the same option used by TsFile's own build.
+  target_compile_options(tsfile_sdk INTERFACE /Zc:__cplusplus)
+endif()
 target_include_directories(tsfile_sdk INTERFACE "${TSFILE_CPP_SOURCE_DIR}/src")
 target_link_libraries(tsfile_sdk INTERFACE tsfile_snappy tsfile_lz4
                                              tsfile_lzokay tsfile_zlib
